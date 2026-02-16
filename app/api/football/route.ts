@@ -116,12 +116,17 @@ async function fetchNewsApi(out: Feed) {
     }))
     .filter((n) => (requireNewsImage() ? !!n.image : true))
     .slice(0, 8);
-  const picked = itemsFromRss
-    .filter((n) => (requireNewsImage() ? !!n.image : true))
-    .slice(0, 8);
+  const picked = (out.news ?? [])
+  .filter((n) => (requireNewsImage() ? !!n.image : true))
+  .slice(0, 8);
 
-  out.news = picked;
-  out.debug = { ...(out.debug || {}), rss: { ok: picked.length > 0, picked: picked.length } };
+out.news = picked;
+
+out.debug = {
+  ...(out.debug || {}),
+  rss: { ok: picked.length > 0, picked: picked.length },
+};
+
 }
 
 // ---------- Matches: football-data.org (optional key) ----------
