@@ -1,4 +1,7 @@
 import { Metadata } from "next";
+import { headers } from "next/headers";
+
+export const dynamic = "force-dynamic";
 
 type Props = {
   params: { slug: string };
@@ -6,8 +9,11 @@ type Props = {
 };
 
 async function getData() {
-  const base = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
-  const res = await fetch(`${base}/api/football`, { next: { revalidate: 600, tags: ["football-feed"] } });
+  const h = headers();
+  const host = h.get("x-forwarded-host") || h.get("host") || "localhost:3000";
+  const proto = h.get("x-forwarded-proto") || "https";
+  const base = `${proto}://${host}`;
+  const res = await fetch(`${base}/api/football`, { cache: "no-store" });
   return res.json();
 }
 

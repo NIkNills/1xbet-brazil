@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+// Cache at the route level
 export const revalidate = 600;
 
 type NewsItem = { title: string; description: string; date: string; image?: string; url?: string; source?: string };
@@ -41,7 +42,9 @@ function isClearlyNotSports(a: any) {
   const title = safeText(a?.title).toLowerCase();
   const desc = safeText(a?.description).toLowerCase();
   const text = `${title} ${desc}`;
-  return /(hotel|turismo|viagem|restaurante|im[óo]veis|novela|celebridade|android|iphone|criptomo|bolsa de valores|internet|tecnologia)/i.test(text);
+  return /(hotel|turismo|viagem|restaurante|im[óo]veis|novela|celebridade|android|iphone|criptomo|bolsa de valores|internet|tecnologia)/i.test(
+    text
+  );
 }
 
 function isSportsRelevant(a: any) {
@@ -55,6 +58,8 @@ function isSportsRelevant(a: any) {
 
 function requireNewsImage() {
   const v = (process.env.NEWS_REQUIRE_IMAGE || "").trim().toLowerCase();
+  // default: true (safer for card UI)
+  if (!v) return true;
   return v === "1" || v === "true" || v === "yes";
 }
 
@@ -120,7 +125,7 @@ async function fetchNewsApi(out: Feed) {
 
 // ---------- News fallback: Google News RSS (no key) ----------
 function xmlGetAll(xml: string, tag: string) {
-  const re = new RegExp(`<${tag}[^>]*>([\s\S]*?)<\/${tag}>`, "gi");
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "gi");
   const out: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml))) out.push(m[1]);
@@ -142,7 +147,6 @@ function decodeEntities(s: string) {
 }
 
 async function fetchGoogleRss(out: Feed) {
-  // Google News RSS is usually stable + valid TLS.
   const url =
     "https://news.google.com/rss/search?q=futebol%20OR%20brasileir%C3%A3o%20OR%20libertadores%20OR%20champions%20OR%20nba&hl=pt-BR&gl=BR&ceid=BR:pt-419";
 
@@ -161,7 +165,6 @@ async function fetchGoogleRss(out: Feed) {
       const link = stripTags(decodeEntities(xmlFirst(ix, "link")));
       const pubDate = stripTags(decodeEntities(xmlFirst(ix, "pubDate"))) || new Date().toISOString();
       const desc = stripTags(decodeEntities(xmlFirst(ix, "description")));
-      // Some Google RSS items have source in <source>...</source>
       const src = stripTags(decodeEntities(xmlFirst(ix, "source")));
 
       return {
@@ -177,10 +180,7 @@ async function fetchGoogleRss(out: Feed) {
     .filter((n) => !isClearlyNotSports(n) && isSportsRelevant(n))
     .slice(0, 8);
 
-  if (picked.length) {
-    out.news = picked;
-  }
-
+  if (picked.length) out.news = picked;
   out.debug = { ...(out.debug || {}), rss_google: { ok: picked.length > 0, picked: picked.length } };
 }
 
@@ -197,8 +197,7 @@ function fmtMatchFD(m: any): MatchItem | null {
   const status = safeText(m?.status);
   if (!home || !away || !dt) return null;
   const title = `${home} x ${away}`;
-  const url = m?.id ? `https://www.football-data.org/` : undefined;
-  return { title, date: dt, league: comp || status || undefined, url };
+  return { title, date: dt, league: comp || status || undefined };
 }
 
 async function fetchFootballData(out: Feed) {
@@ -208,40 +207,47 @@ async function fetchFootballData(out: Feed) {
     return;
   }
 
-  const season = (process.env.FOOTBALL_SEASON || "").trim();
-  const base = "https://api.football-data.org/v4";
-  const url = season ? `${base}/matches?dateFrom=${season}-01-01&dateTo=${season}-12-31&limit=20` : `${base}/matches?limit=20`;
+  // Keep it simple: fetch last/next week window
+  const now = new Date();
+  const toISO = (d: Date) => d.toISOString().slice(0, 10);
+  const dateFrom = toISO(new Date(now.getTime() - 24 * 3600 * 1000));
+  const dateTo = toISO(new Date(now.getTime() + 7 * 24 * 3600 * 1000));
 
-  const res = await fetch(url, { headers: { "X-Auth-Token": key, ...UA_HEADERS }, next: { revalidate: 900, tags: ["football-data"] } });
+  const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+  const res = await fetch(url, {
+    headers: { "X-Auth-Token": key, ...UA_HEADERS },
+    next: { revalidate: 900, tags: ["football-data"] },
+  });
+
   if (!res.ok) {
     out.debug = { ...(out.debug || {}), footballdata_status: res.status };
     return;
   }
+
   const j = await res.json();
   const matches = Array.isArray(j?.matches) ? j.matches : [];
 
-  const now = Date.now();
-  const parsed = matches.map(fmtMatchFD).filter(Boolean) as MatchItem[];
+  const next: MatchItem[] = [];
+  const last: MatchItem[] = [];
 
-  const upcoming = parsed
-    .map((m: any) => ({ ...m, ts: m.date ? Date.parse(m.date) : 0 }))
-    .filter((m: any) => m.ts >= now)
-    .sort((a: any, b: any) => a.ts - b.ts)
-    .slice(0, 12);
+  for (const m of matches) {
+    const item = fmtMatchFD(m);
+    if (!item) continue;
+    const status = safeText(m?.status);
+    if (status === "FINISHED") last.push(item);
+    else next.push(item);
+  }
 
-  const recent = parsed
-    .map((m: any) => ({ ...m, ts: m.date ? Date.parse(m.date) : 0 }))
-    .filter((m: any) => m.ts < now)
-    .sort((a: any, b: any) => b.ts - a.ts)
-    .slice(0, 12);
+  next.sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
+  last.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 
-  if (!out.nextMatches.length) out.nextMatches = upcoming.map((x: any) => ({ title: x.title, date: x.date, league: x.league, url: x.url }));
-  if (!out.lastResults.length) out.lastResults = recent.map((x: any) => ({ title: x.title, date: x.date, league: x.league, url: x.url }));
+  if (next.length) out.nextMatches = next.slice(0, 12);
+  if (last.length) out.lastResults = last.slice(0, 12);
 
-  out.debug = { ...(out.debug || {}), footballdata: { ok: true, next: out.nextMatches.length, last: out.lastResults.length } };
+  out.debug = { ...(out.debug || {}), footballdata: { ok: true, total: matches.length, next: out.nextMatches.length, last: out.lastResults.length } };
 }
 
-// ---------- Matches: ScoreBat (no key) ----------
+// ---------- Matches: ScoreBat fallback (no key) ----------
 async function fetchScoreBat(out: Feed) {
   const res = await fetch("https://www.scorebat.com/video-api/v3/", {
     next: { revalidate: 900, tags: ["scorebat"] },
@@ -319,6 +325,5 @@ export async function GET() {
   }
 
   if (process.env.NODE_ENV !== "development") delete out.debug;
-
   return NextResponse.json(out);
 }

@@ -25,19 +25,13 @@
       "@/*": [
         "./*"
       ]
-    },
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ]
+    }
   },
   "include": [
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    "types/**/*.d.ts",
-    ".next/types/**/*.ts"
+    "types/**/*.d.ts"
   ],
   "exclude": [
     "node_modules"
