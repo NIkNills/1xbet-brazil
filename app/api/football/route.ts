@@ -39,25 +39,15 @@ function isSportsRelevant(a: any) {
   const title = safeText(a?.title).toLowerCase();
   const desc = safeText(a?.description).toLowerCase();
   const text = `${title} ${desc}`;
-
-  // Must contain at least one sports keyword (PT/EN/ES common)
-  const sportsKw = [
-    "futebol","gol","gols","campeonato","liga","libertadores","brasileirão","copa","seleção","jogo","partida","clube",
-    "premier","laliga","la liga","serie a","bundesliga","ligue 1","champions",
-    "nba","basquete","tênis","tenis","fórmula","formula 1","ufc","mma","vôlei","volei","boxing","boxe",
-    "elenco","treinador","técnico","tatico","tático","transfer","contratação","mercado da bola","aposta","odds"
-  ];
-  const hit = sportsKw.some((k) => text.includes(k));
-
-  // Drop some recurring non-sports noise even if it contains "futebol" somewhere
-  const noise = /(launcher|linux|android|iphone|criptomo|bolsa de valores|startup|tecnologia|internet|ia|inteligência artificial)/i.test(text);
-  return hit && !noise;
+  return /(futebol|jogo|time|sele[cç][aã]o|gol|campeonato|copa|libertadores|champions|brasileir[aã]o|nba|ufc|mma|f1|fórmula|tenis|tênis|vôlei|basquete)/i.test(text);
 }
 
 function requireNewsImage() {
-  return (process.env.NEWS_REQUIRE_IMAGE || "true").toLowerCase() !== "false";
+  const v = (process.env.NEWS_REQUIRE_IMAGE || "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
+// ---------- News: NewsAPI (optional key) ----------
 function envNewsKey() {
   return (
     process.env.NEWSAPI_KEY ||
@@ -105,7 +95,7 @@ async function fetchNewsApi(out: Feed) {
     }
   }
 
-  out.news = pick
+  const picked = pick
     .map((a: any) => ({
       title: safeText(a.title) || "Notícia esportiva",
       description: safeText(a.description) || safeText(a.content) || "",
@@ -116,17 +106,9 @@ async function fetchNewsApi(out: Feed) {
     }))
     .filter((n) => (requireNewsImage() ? !!n.image : true))
     .slice(0, 8);
-  const picked = (out.news ?? [])
-  .filter((n) => (requireNewsImage() ? !!n.image : true))
-  .slice(0, 8);
 
-out.news = picked;
-
-out.debug = {
-  ...(out.debug || {}),
-  rss: { ok: picked.length > 0, picked: picked.length },
-};
-
+  out.news = picked;
+  out.debug = { ...(out.debug || {}), newsapi: { ok: picked.length > 0, picked: picked.length } };
 }
 
 // ---------- Matches: football-data.org (optional key) ----------
@@ -138,18 +120,13 @@ function fmtMatchFD(m: any): MatchItem | null {
   const home = safeText(m?.homeTeam?.name);
   const away = safeText(m?.awayTeam?.name);
   const dt = safeText(m?.utcDate);
-  const league = safeText(m?.competition?.name) || safeText(m?.competition?.code);
+  const comp = safeText(m?.competition?.name);
+  const status = safeText(m?.status);
   if (!home || !away || !dt) return null;
-
-  const hs = m?.score?.fullTime?.home ?? m?.score?.halfTime?.home ?? null;
-  const as = m?.score?.fullTime?.away ?? m?.score?.halfTime?.away ?? null;
-  const hasScore = (hs !== null && hs !== undefined) && (as !== null && as !== undefined);
-  const status = safeText(m?.status); // SCHEDULED, TIMED, IN_PLAY, FINISHED
-
-  const showScore = hasScore && (status === "FINISHED" || status === "IN_PLAY" || status === "PAUSED");
-  const score = showScore ? ` — ${hs}:${as}` : "";
-
-  return { title: `${home} vs ${away}${score}`, date: dt, league };
+  const title = `${home} x ${away}`;
+  const url = m?.id ? `https://www.football-data.org/` : undefined;
+  // keep ISO date
+  return { title, date: dt, league: comp || status || undefined, url };
 }
 
 async function fetchFootballData(out: Feed) {
@@ -159,63 +136,59 @@ async function fetchFootballData(out: Feed) {
     return;
   }
 
-  const headers = { "X-Auth-Token": key, ...UA_HEADERS };
+  // Basic competitions list is restricted on free tiers; we’ll use a generic endpoint example.
+  // If this fails, ScoreBat will be used below.
+  const season = (process.env.FOOTBALL_SEASON || "").trim();
+  const base = "https://api.football-data.org/v4";
+  const url = season
+    ? `${base}/matches?dateFrom=${season}-01-01&dateTo=${season}-12-31&limit=20`
+    : `${base}/matches?limit=20`;
 
-  const now = new Date();
-  const toISO = (d: Date) => d.toISOString().slice(0, 10);
-  const dateFrom = toISO(new Date(now.getTime() - 24 * 3600 * 1000));
-  const dateTo = toISO(new Date(now.getTime() + 7 * 24 * 3600 * 1000));
-
-  // Single call returns matches for the competitions INCLUDED in the user's subscription/tier.
-  // This avoids hardcoding competition codes that may not be available on the free tier.
-  const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
-  const res = await fetch(url, { headers, next: { revalidate: 900, tags: ["football-data"] } });
-
+  const res = await fetch(url, { headers: { "X-Auth-Token": key, ...UA_HEADERS }, next: { revalidate: 900, tags: ["football-data"] } });
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    out.debug = { ...(out.debug || {}), footballdata: { ok: false, status: res.status, body: body.slice(0, 160) } };
+    out.debug = { ...(out.debug || {}), footballdata_status: res.status };
     return;
   }
-
   const j = await res.json();
   const matches = Array.isArray(j?.matches) ? j.matches : [];
 
-  const next: MatchItem[] = [];
-  const last: MatchItem[] = [];
+  const now = Date.now();
+  const parsed = matches
+    .map(fmtMatchFD)
+    .filter(Boolean) as MatchItem[];
 
-  for (const m of matches) {
-    const item = fmtMatchFD(m);
-    if (!item) continue;
-    const status = safeText(m?.status);
-    if (status === "FINISHED") last.push(item);
-    else next.push(item);
-  }
+  const upcoming = parsed
+    .map((m: any) => ({ ...m, ts: m.date ? Date.parse(m.date) : 0 }))
+    .filter((m: any) => m.ts >= now)
+    .sort((a: any, b: any) => a.ts - b.ts)
+    .slice(0, 12);
 
-  next.sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
-  last.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  const recent = parsed
+    .map((m: any) => ({ ...m, ts: m.date ? Date.parse(m.date) : 0 }))
+    .filter((m: any) => m.ts < now)
+    .sort((a: any, b: any) => b.ts - a.ts)
+    .slice(0, 12);
 
-  if (next.length) out.nextMatches = next.slice(0, 12);
-  if (last.length) out.lastResults = last.slice(0, 12);
-
-  out.debug = { ...(out.debug || {}), footballdata: { ok: true, total: matches.length, next: out.nextMatches.length, last: out.lastResults.length } };
+  if (!out.nextMatches.length) out.nextMatches = upcoming.map((x: any) => ({ title: x.title, date: x.date, league: x.league, url: x.url }));
+  if (!out.lastResults.length) out.lastResults = recent.map((x: any) => ({ title: x.title, date: x.date, league: x.league, url: x.url }));
+  out.debug = { ...(out.debug || {}), footballdata: { ok: true, next: out.nextMatches.length, last: out.lastResults.length } };
 }
 
-// ---------- Matches: ScoreBat fallback (no key) ----------
+// ---------- Matches: ScoreBat (no key) ----------
 async function fetchScoreBat(out: Feed) {
   const res = await fetch("https://www.scorebat.com/video-api/v3/", {
     next: { revalidate: 900, tags: ["scorebat"] },
     headers: UA_HEADERS,
   });
   if (!res.ok) {
-    out.debug = { ...(out.debug || {}), scorebat: { ok: false, status: res.status } };
+    out.debug = { ...(out.debug || {}), scorebat_status: res.status };
     return;
   }
   const j = await res.json();
-  const resp = j?.response;
-  const list = Array.isArray(resp) ? resp : [];
+  const resp = Array.isArray(j?.response) ? j.response : [];
 
   const now = Date.now();
-  const parsed = list
+  const parsed = resp
     .map((m: any) => {
       const title = safeText(m?.title);
       const competition = safeText(m?.competition);
@@ -238,11 +211,8 @@ async function fetchScoreBat(out: Feed) {
 export async function GET() {
   const out: Feed = { news: [], nextMatches: [], lastResults: [], standings: [] };
 
-  // News: NewsAPI → RSS
+  // News: NewsAPI
   try { await fetchNewsApi(out); } catch (e: any) { out.debug = { ...(out.debug || {}), newsapi_error: String(e?.message || e) }; }
-  if (!out.news.length) {
-    try { await fetchRss(out); } catch (e: any) { out.debug = { ...(out.debug || {}), rss_error: String(e?.message || e) }; }
-  }
 
   // Matches: football-data.org → ScoreBat
   try { await fetchFootballData(out); } catch (e: any) { out.debug = { ...(out.debug || {}), footballdata_error: String(e?.message || e) }; }
