@@ -116,7 +116,12 @@ async function fetchNewsApi(out: Feed) {
     }))
     .filter((n) => (requireNewsImage() ? !!n.image : true))
     .slice(0, 8);
-  out.debug = { ...(out.debug || {}), rss: { ok: items.length > 0, picked: items.length } };
+  const picked = itemsFromRss
+    .filter((n) => (requireNewsImage() ? !!n.image : true))
+    .slice(0, 8);
+
+  out.news = picked;
+  out.debug = { ...(out.debug || {}), rss: { ok: picked.length > 0, picked: picked.length } };
 }
 
 // ---------- Matches: football-data.org (optional key) ----------
