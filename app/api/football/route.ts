@@ -168,9 +168,10 @@ async function fetchGoogleRss(out: Feed) {
         title: title || "Notícia esportiva",
         description: desc || "",
         date: pubDate,
+        image: undefined,
         url: link || undefined,
         source: src || "Google News",
-      };
+      } as NewsItem;
     })
     .filter((n) => (requireNewsImage() ? !!n.image : true))
     .filter((n) => !isClearlyNotSports(n) && isSportsRelevant(n))
